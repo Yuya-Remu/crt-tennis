@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ブラウン管テニス</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap">
+<style>
+  :root {
+    --ground: #060a08;
+    --panel: #0b130f;
+    --line: #1f3428;
+    --phos: #d6ffe2;
+    --dim: #6c957c;
+    --amber: #ffbf5e;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--phos);
+    font-family: "DotGothic16", "MS Gothic", "Osaka-Mono", monospace;
+    padding-inline: 16px;
+    padding-block: 20px 28px;
+    box-sizing: border-box;
+  }
+  .cab { max-width: 980px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; }
+  h1 { margin: 0; font-size: 28px; font-weight: 400; letter-spacing: .12em; text-shadow: 0 0 10px rgba(160,255,190,.45); text-wrap: balance; }
+  .sub { color: var(--dim); font-size: 13px; letter-spacing: .14em; }
+
+  .screen {
+    position: relative;
+    width: min(100%, calc((100dvh - 260px) * 1.6));
+    min-width: min(100%, 320px);
+    max-width: 100%;
+    margin-inline: auto;
+    aspect-ratio: 8 / 5;
+    border-radius: 18px;
+    overflow: hidden;
+    background: #020403;
+    box-shadow: 0 0 0 1px var(--line), 0 0 0 10px var(--panel), 0 0 0 11px var(--line), 0 0 48px rgba(120,255,170,.07);
+  }
+  .screen::after {
+    content: "";
+    position: absolute; inset: 0;
+    pointer-events: none;
+    background:
+      repeating-linear-gradient(to bottom, rgba(0,0,0,.25) 0 1px, transparent 1px 3px),
+      radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.65) 100%);
+  }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  canvas.playing { cursor: none; }
+
+  .controls { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 12px 20px; }
+  .seg { display: flex; align-items: center; gap: 6px; }
+  .seg > span { color: var(--dim); font-size: 13px; letter-spacing: .1em; margin-right: 4px; }
+  button {
+    font: inherit; font-size: 15px;
+    background: transparent;
+    color: var(--dim);
+    border: 1px solid var(--line);
+    padding: 7px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  button:hover { color: var(--phos); border-color: var(--dim); }
+  button[aria-pressed="true"] { background: var(--phos); color: var(--ground); border-color: var(--phos); }
+  button:disabled { opacity: .35; cursor: not-allowed; }
+  button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  .start { color: var(--amber); border-color: var(--amber); padding-inline: 18px; letter-spacing: .1em; }
+  .start:hover { color: var(--ground); background: var(--amber); border-color: var(--amber); }
+
+  .help { margin: 0; color: var(--dim); font-size: 13px; text-align: center; line-height: 1.9; }
+  kbd { font: inherit; color: var(--phos); border: 1px solid var(--line); border-radius: 3px; padding: 0 5px; }
+</style>
+
+<main class="cab">
+  <header>
+    <h1>ブラウン管テニス</h1>
+    <span class="sub">TABLE TENNIS · 1972 STYLE · 11点先取</span>
+  </header>
+
+  <div class="screen"><canvas id="court" aria-label="テニスコート"></canvas></div>
+
+  <div class="controls">
+    <div class="seg" role="group" aria-label="対戦モード">
+      <span>対戦</span>
+      <button id="mode-1p" type="button" aria-pressed="true">1P vs CPU</button>
+      <button id="mode-2p" type="button" aria-pressed="false">2P 対戦</button>
+    </div>
+    <div class="seg" role="group" aria-label="CPUの強さ">
+      <span>CPU</span>
+      <button id="diff-easy" type="button" data-diff="easy" aria-pressed="false">やさしい</button>
+      <button id="diff-normal" type="button" data-diff="normal" aria-pressed="true">ふつう</button>
+      <button id="diff-hard" type="button" data-diff="hard" aria-pressed="false">つよい</button>
+    </div>
+    <button id="sound" type="button" aria-pressed="true">音 ON</button>
+    <button id="start" class="start" type="button">スタート</button>
+  </div>
+
+  <p class="help" id="help"></p>
+</main>
+
+<script>
+(() => {
+  const W = 800, H = 500;
+  const PH = 72, PW = 12, B = 12, MARGIN = 28;
+  const MAX_ANGLE = 55 * Math.PI / 180;
+  const SERVE_SPEED = 380, MAX_SPEED = 1100, SPEEDUP = 1.05;
+  const WIN = 11;
+  const LEVELS = {
+    easy:   { speed: 250, react: 0.5, predict: 0,   err: 40 },
+    normal: { speed: 370, react: 0.7, predict: 0.6, err: 26 },
+    hard:   { speed: 540, react: 1.0, predict: 1,   err: 14 },
+  };
+  const PHOS = "#d6ffe2", AMBER = "#ffbf5e";
+
+  const canvas = document.getElementById("court");
+  const ctx = canvas.getContext("2d");
+  const helpEl = document.getElementById("help");
+  const startBtn = document.getElementById("start");
+  const soundBtn = document.getElementById("sound");
+  const modeBtns = { "1p": document.getElementById("mode-1p"), "2p": document.getElementById("mode-2p") };
+  const diffBtns = [...document.querySelectorAll("[data-diff]")];
+
+  const game = {
+    mode: "1p", diff: "normal", phase: "attract", paused: false,
+    score: [0, 0], timer: 0.8, serveDir: 1, sound: true,
+  };
+  const pads = [{ y: H / 2, err: 0 }, { y: H / 2, err: 0 }];
+  const ball = { x: W / 2, y: H / 2, vx: 0, vy: 0, speed: SERVE_SPEED };
+  const keys = new Set();
+  const pointer = [null, null];
+
+  // ---------- sizing ----------
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = "#020403"; ctx.fillRect(0, 0, W, H);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ---------- sound ----------
+  let actx = null;
+  function beep(freq, dur) {
+    if (!game.sound) return;
+    try {
+      actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+      const t = actx.currentTime;
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = "square"; o.frequency.value = freq;
+      g.gain.setValueAtTime(0.06, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g).connect(actx.destination);
+      o.start(t); o.stop(t + dur + 0.02);
+    } catch (e) {}
+  }
+
+  // ---------- flow ----------
+  function centerBall() { ball.x = W / 2; ball.y = H / 2; ball.vx = ball.vy = 0; }
+  function launch() {
+    const a = (Math.random() * 2 - 1) * 25 * Math.PI / 180;
+    ball.speed = SERVE_SPEED;
+    ball.vx = Math.cos(a) * ball.speed * game.serveDir;
+    ball.vy = Math.sin(a) * ball.speed;
+    ball.y = H * (0.3 + Math.random() * 0.4);
+  }
+  function startMatch() {
+    if (actx && actx.state === "suspended") actx.resume();
+    game.score = [0, 0];
+    game.phase = "serve"; game.paused = false;
+    game.timer = 1.0;
+    game.serveDir = Math.random() < 0.5 ? -1 : 1;
+    centerBall();
+    beep(240, 0.08);
+    syncUI();
+  }
+  function toAttract() {
+    game.phase = "attract"; game.paused = false; game.score = [0, 0];
+    game.timer = 0.6; centerBall(); syncUI();
+  }
+  function pointTo(side) {
+    if (game.phase === "attract") {
+      game.serveDir = side === 0 ? 1 : -1; game.timer = 0.6; centerBall(); return;
+    }
+    game.score[side]++;
+    beep(120, 0.35);
+    if (game.score[side] >= WIN) {
+      game.phase = "over"; centerBall(); syncUI(); return;
+    }
+    game.phase = "serve"; game.timer = 0.9;
+    game.serveDir = side === 0 ? 1 : -1; // 失点した側へサーブ
+    centerBall();
+  }
+
+  // ---------- control ----------
+  function predictY(xTarget) {
+    if (ball.vx === 0) return ball.y;
+    const t = (xTarget - ball.x) / ball.vx;
+    if (t < 0) return ball.y;
+    const lo = B / 2, span = H - B;
+    let y = ball.y + ball.vy * t - lo;
+    y = ((y % (2 * span)) + 2 * span) % (2 * span);
+    if (y > span) y = 2 * span - y;
+    return y + lo;
+  }
+  function cpu(i, lvl, dt) {
+    const p = pads[i];
+    const towards = i === 0 ? ball.vx < 0 : ball.vx > 0;
+    const dist = i === 0 ? ball.x : W - ball.x;
+    let target = H / 2;
+    if (towards && dist < W * lvl.react) {
+      const face = i === 0 ? MARGIN + PW : W - MARGIN - PW;
+      target = ball.y + (predictY(face) - ball.y) * lvl.predict + p.err;
+    }
+    const d = target - p.y;
+    if (Math.abs(d) > 3) p.y += Math.max(-lvl.speed * dt, Math.min(lvl.speed * dt, d));
+  }
+  function human(i, up, down, dt) {
+    const p = pads[i];
+    const dir = (up.some(k => keys.has(k)) ? -1 : 0) + (down.some(k => keys.has(k)) ? 1 : 0);
+    if (dir) { p.y += dir * 560 * dt; pointer[i] = null; }
+    else if (pointer[i] != null) {
+      const d = pointer[i] - p.y, m = 1600 * dt;
+      p.y += Math.max(-m, Math.min(m, d));
+    }
+  }
+  function clampPads() {
+    for (const p of pads) p.y = Math.max(PH / 2, Math.min(H - PH / 2, p.y));
+  }
+
+  // ---------- physics ----------
+  function hit(i, yAtFace, faceX) {
+    const p = pads[i];
+    const reach = PH / 2 + B / 2;
+    const rel = Math.max(-1, Math.min(1, (yAtFace - p.y) / reach));
+    const a = rel * MAX_ANGLE;
+    ball.speed = Math.min(MAX_SPEED, ball.speed * SPEEDUP);
+    const dir = i === 0 ? 1 : -1;
+    ball.vx = Math.cos(a) * ball.speed * dir;
+    ball.vy = Math.sin(a) * ball.speed;
+    ball.x = faceX + dir * B / 2;
+    ball.y = yAtFace;
+    for (const q of pads) q.err = (Math.random() * 2 - 1) * currentLevel(q === pads[0] ? 0 : 1).err;
+    beep(480, 0.05);
+  }
+  function currentLevel(i) {
+    return game.phase === "attract" ? LEVELS.normal : LEVELS[game.diff];
+  }
+  function stepBall(dt) {
+    const px = ball.x, py = ball.y;
+    ball.x += ball.vx * dt; ball.y += ball.vy * dt;
+
+    if (ball.y < B / 2) { ball.y = B - ball.y; ball.vy = Math.abs(ball.vy); beep(240, 0.03); }
+    else if (ball.y > H - B / 2) { ball.y = 2 * (H - B / 2) - ball.y; ball.vy = -Math.abs(ball.vy); beep(240, 0.03); }
+
+    const reach = PH / 2 + B / 2;
+    const lf = MARGIN + PW;
+    if (ball.vx < 0 && px - B / 2 >= lf && ball.x - B / 2 < lf) {
+      const t = (px - B / 2 - lf) / (px - ball.x);
+      const yc = py + (ball.y - py) * t;
+      if (Math.abs(yc - pads[0].y) <= reach) hit(0, yc, lf);
+    }
+    const rf = W - MARGIN - PW;
+    if (ball.vx > 0 && px + B / 2 <= rf && ball.x + B / 2 > rf) {
+      const t = (rf - px - B / 2) / (ball.x - px);
+      const yc = py + (ball.y - py) * t;
+      if (Math.abs(yc - pads[1].y) <= reach) hit(1, yc, rf);
+    }
+
+    if (ball.x < -B) pointTo(1);
+    else if (ball.x > W + B) pointTo(0);
+  }
+
+  function update(dt) {
+    if (game.paused) return;
+    const ph = game.phase;
+    if (ph === "attract") {
+      cpu(0, LEVELS.normal, dt); cpu(1, LEVELS.normal, dt);
+    } else if (game.mode === "1p") {
+      human(0, ["w", "arrowup"], ["s", "arrowdown"], dt);
+      cpu(1, LEVELS[game.diff], dt);
+    } else {
+      human(0, ["w"], ["s"], dt);
+      human(1, ["arrowup"], ["arrowdown"], dt);
+    }
+    clampPads();
+
+    if (ph === "serve" || (ph === "attract" && ball.vx === 0)) {
+      game.timer -= dt;
+      if (game.timer <= 0) { launch(); if (ph === "serve") game.phase = "play"; }
+      return;
+    }
+    if (ph === "play" || ph === "attract") {
+      const steps = Math.ceil(ball.speed * dt / 6);
+      for (let s = 0; s < steps && (game.phase === ph); s++) {
+        stepBall(dt / steps);
+        if (ball.vx === 0) break;
+      }
+    }
+  }
+
+  // ---------- drawing ----------
+  const DIGITS = {
+    0: ["111","101","101","101","111"], 1: ["001","001","001","001","001"],
+    2: ["111","001","111","100","111"], 3: ["111","001","111","001","111"],
+    4: ["101","101","111","001","001"], 5: ["111","100","111","001","111"],
+    6: ["111","100","111","101","111"], 7: ["111","001","001","001","001"],
+    8: ["111","101","111","101","111"], 9: ["111","101","111","001","111"],
+  };
+  function drawNumber(n, rightEdge, y, s) {
+    const str = String(n);
+    let x = rightEdge - (str.length * 4 - 1) * s;
+    for (const ch of str) {
+      DIGITS[ch].forEach((row, r) => {
+        for (let c = 0; c < 3; c++) if (row[c] === "1") ctx.fillRect(x + c * s, y + r * s, s, s);
+      });
+      x += 4 * s;
+    }
+  }
+  function text(str, y, size, color) {
+    ctx.fillStyle = color || PHOS;
+    ctx.font = `${size}px "DotGothic16", "MS Gothic", monospace`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(str, W / 2, y);
+  }
+  function banner(lines) {
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "rgba(2,4,3,.82)";
+    ctx.fillRect(W / 2 - 230, H / 2 - 70, 460, 140);
+    ctx.shadowBlur = 10;
+    lines.forEach(([s, size, color], i) => text(s, H / 2 - 28 + i * 52, size, color));
+  }
+
+  function draw() {
+    // 残光：前フレームを少し残して消す
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "rgba(2,4,3,0.5)";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.shadowColor = "rgba(170,255,200,.8)";
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = PHOS;
+
+    for (let y = 6; y < H; y += 24) ctx.fillRect(W / 2 - 2, y, 4, 12);
+
+    const s = 9;
+    drawNumber(game.score[0], W / 2 - 50, 28, s);
+    const r = String(game.score[1]);
+    drawNumber(game.score[1], W / 2 + 50 + (r.length * 4 - 1) * s, 28, s);
+    pads.forEach((p, i) => {
+      const x = i === 0 ? MARGIN : W - MARGIN - PW;
+      ctx.fillRect(x, p.y - PH / 2, PW, PH);
+    });
+
+    const showBall = game.phase === "play" || (game.phase === "attract" && ball.vx !== 0) ||
+      (game.phase === "serve" && Math.floor(game.timer * 6) % 2 === 0);
+    if (showBall) ctx.fillRect(ball.x - B / 2, ball.y - B / 2, B, B);
+
+    if (game.phase === "attract") {
+      banner([["ブラウン管テニス", 34], ["スペース / タップでスタート", 20, AMBER]]);
+    } else if (game.phase === "over") {
+      const w = game.score[0] > game.score[1] ? 0 : 1;
+      const msg = game.mode === "1p" ? (w === 0 ? "あなたの勝ち！" : "CPUの勝ち") : (w === 0 ? "左プレイヤーの勝ち！" : "右プレイヤーの勝ち！");
+      banner([[msg, 34], ["スペース / タップでもう一度", 20, AMBER]]);
+    } else if (game.paused) {
+      banner([["一時停止", 34], ["P キー / タップで再開", 20, AMBER]]);
+    }
+    ctx.shadowBlur = 0;
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ---------- input ----------
+  function primary() {
+    if (game.phase === "attract" || game.phase === "over") startMatch();
+    else if (game.paused) { game.paused = false; syncUI(); }
+  }
+  function togglePause() {
+    if (game.phase !== "play" && game.phase !== "serve") return;
+    game.paused = !game.paused; syncUI();
+  }
+  window.addEventListener("keydown", e => {
+    const k = e.key.toLowerCase();
+    if (["arrowup", "arrowdown", " "].includes(k) && e.target === document.body) e.preventDefault();
+    if (k === " " || k === "enter") {
+      if (e.target.tagName === "BUTTON") return;
+      e.preventDefault(); primary(); return;
+    }
+    if (k === "p" || k === "escape") { togglePause(); return; }
+    keys.add(k);
+  });
+  window.addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+  window.addEventListener("blur", () => { keys.clear(); if (game.phase === "play") { game.paused = true; syncUI(); } });
+
+  function pointerToCourt(e) {
+    const r = canvas.getBoundingClientRect();
+    const y = (e.clientY - r.top) / r.height * H;
+    const side = game.mode === "2p" && (e.clientX - r.left) > r.width / 2 ? 1 : 0;
+    pointer[side] = y;
+  }
+  canvas.addEventListener("pointermove", pointerToCourt);
+  canvas.addEventListener("pointerdown", e => {
+    if (game.phase === "attract" || game.phase === "over" || game.paused) { primary(); return; }
+    pointerToCourt(e);
+  });
+
+  // ---------- UI ----------
+  function syncUI() {
+    for (const [m, b] of Object.entries(modeBtns)) b.setAttribute("aria-pressed", String(game.mode === m));
+    diffBtns.forEach(b => { b.setAttribute("aria-pressed", String(game.diff === b.dataset.diff)); b.disabled = game.mode === "2p"; });
+    soundBtn.textContent = game.sound ? "音 ON" : "音 OFF";
+    soundBtn.setAttribute("aria-pressed", String(game.sound));
+    const active = game.phase === "play" || game.phase === "serve";
+    startBtn.textContent = active ? "やり直す" : "スタート";
+    canvas.classList.toggle("playing", active && !game.paused);
+    helpEl.innerHTML = game.mode === "1p"
+      ? "操作：<kbd>W</kbd>/<kbd>S</kbd> または <kbd>↑</kbd>/<kbd>↓</kbd>、マウスやタッチでもラケットが動きます ・ <kbd>P</kbd> 一時停止 ・ 11点先取"
+      : "左：<kbd>W</kbd>/<kbd>S</kbd> ・ 右：<kbd>↑</kbd>/<kbd>↓</kbd> ・ タッチは画面の左半分／右半分で操作 ・ <kbd>P</kbd> 一時停止 ・ 11点先取";
+  }
+  modeBtns["1p"].addEventListener("click", () => { game.mode = "1p"; toAttract(); });
+  modeBtns["2p"].addEventListener("click", () => { game.mode = "2p"; toAttract(); });
+  diffBtns.forEach(b => b.addEventListener("click", () => { game.diff = b.dataset.diff; syncUI(); }));
+  soundBtn.addEventListener("click", () => { game.sound = !game.sound; syncUI(); });
+  startBtn.addEventListener("click", () => { startMatch(); startBtn.blur(); });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && game.phase === "play") { game.paused = true; syncUI(); }
+  });
+
+  syncUI();
+})();
+</script>
